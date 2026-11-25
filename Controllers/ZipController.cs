@@ -152,7 +152,7 @@ namespace wow.tools.local.Controllers
                 Options = FileOptions.DeleteOnClose | FileOptions.SequentialScan
             });
 
-            return new SizeLimitedStream(fileStream, MaxArchiveBytes, ArchiveJobLimiter.Release);
+            return new SizeLimitedStream(fileStream, MaxArchiveBytes, () => ArchiveJobLimiter.Release());
         }
 
         private static void CopyWithLimit(Stream source, Stream destination, byte[] buffer, ref long remainingBytes)
