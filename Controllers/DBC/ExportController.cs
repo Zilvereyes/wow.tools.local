@@ -1,6 +1,8 @@
 ﻿using DBCD;
+using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Mvc;
 using System.IO.Compression;
+using System.Text;
 using wow.tools.local;
 using wow.tools.local.Managers;
 using wow.tools.local.Providers;
@@ -16,12 +18,24 @@ namespace wow.tools.Local.Controllers
     [ApiController]
     public class ExportController(IDBCManager dbcManager) : ControllerBase
     {
+        private const int MaxBulkExportTables = 2048;
+        private const long MaxBulkExportUncompressedBytes = 2L * 1024 * 1024 * 1024;
+        private const long MaxBulkExportCompressedBytes = 1024L * 1024 * 1024;
+
         private static readonly Parameters DefaultParameters = new Dictionary<string, string>();
         private static readonly char[] QuoteableChars = [',', '"', '\r', '\n'];
+        private static readonly SemaphoreSlim BulkExportGate = new(1, 1);
 
         private readonly DBCManager dbcManager = (DBCManager)dbcManager;
 
         private static async Task<byte[]> GenerateCSVStream(IDBCDStorage storage, Parameters parameters, bool newLinesInStrings = true)
+        {
+            using var exportStream = new MemoryStream();
+            await WriteCSVStream(exportStream, storage, parameters, newLinesInStrings, CancellationToken.None);
+            return exportStream.ToArray();
+        }
+
+        private static async Task WriteCSVStream(Stream exportStream, IDBCDStorage storage, Parameters parameters, bool newLinesInStrings, CancellationToken cancellationToken)
         {
             Thread.CurrentThread.CurrentCulture = System.Globalization.CultureInfo.InvariantCulture;
 
@@ -39,19 +53,16 @@ namespace wow.tools.Local.Controllers
 
             var viewFilter = new DBCViewFilter(storage, parameters, formatter);
 
-            using var exportStream = new MemoryStream();
-            using var exportWriter = new StreamWriter(exportStream);
+            using var exportWriter = new StreamWriter(exportStream, new UTF8Encoding(false), 1024, leaveOpen: true);
 
             // write header
-            await exportWriter.WriteLineAsync(string.Join(",", GetColumnNames(storage)));
+            await exportWriter.WriteLineAsync(string.Join(",", GetColumnNames(storage)).AsMemory(), cancellationToken);
 
             // write records
-            foreach (var item in viewFilter.GetRecords())
-                await exportWriter.WriteLineAsync(string.Join(",", item));
+            foreach (var item in viewFilter.GetRecords(cancellationToken))
+                await exportWriter.WriteLineAsync(string.Join(",", item).AsMemory(), cancellationToken);
 
-            exportWriter.Flush();
-
-            return exportStream.ToArray();
+            await exportWriter.FlushAsync(cancellationToken);
         }
 
         [Route("")]
@@ -130,49 +141,109 @@ namespace wow.tools.Local.Controllers
 
         [Route("all")]
         [HttpGet]
-        public async Task<ActionResult> ExportAllCSV(string? build, bool useHotfixes = false, bool newLinesInStrings = true, LocaleFlags locale = LocaleFlags.All_WoW)
+        public async Task ExportAllCSV(string? build, bool useHotfixes = false, bool newLinesInStrings = true, LocaleFlags locale = LocaleFlags.All_WoW, CancellationToken cancellationToken = default)
         {
             Console.WriteLine("Exporting all DBCs build " + build + " and locale " + locale);
             if (build == null)
                 build = CASC.BuildName;
 
-            using (var zip = new MemoryStream())
+            var fetchSite = Request.Headers["Sec-Fetch-Site"].ToString();
+            if (!string.IsNullOrEmpty(fetchSite) &&
+                !string.Equals(fetchSite, "same-origin", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(fetchSite, "none", StringComparison.OrdinalIgnoreCase))
             {
-                using (var archive = new ZipArchive(zip, ZipArchiveMode.Create))
+                Response.StatusCode = StatusCodes.Status403Forbidden;
+                await Response.WriteAsync("Cross-origin bulk exports are not allowed.", cancellationToken);
+                return;
+            }
+
+            if (!await BulkExportGate.WaitAsync(0, cancellationToken))
+            {
+                Response.StatusCode = StatusCodes.Status429TooManyRequests;
+                Response.Headers["Retry-After"] = "60";
+                await Response.WriteAsync("A bulk export is already in progress.", cancellationToken);
+                return;
+            }
+
+            try
+            {
+                var tableNames = dbcManager.GetDBCNames(build);
+                if (tableNames.Length > MaxBulkExportTables)
                 {
-                    foreach (var dbname in dbcManager.GetDBCNames(build))
+                    Response.StatusCode = StatusCodes.Status413PayloadTooLarge;
+                    await Response.WriteAsync($"Bulk exports are limited to {MaxBulkExportTables} tables.", cancellationToken);
+                    return;
+                }
+
+                Response.ContentType = "application/octet-stream";
+                Response.Headers["Content-Disposition"] = $"attachment; filename*=UTF-8''{Uri.EscapeDataString("alldbc-" + build + "-" + locale + ".zip")}";
+
+                var compressedBudget = new ByteBudget(MaxBulkExportCompressedBytes, "compressed bulk export");
+                var uncompressedBudget = new ByteBudget(MaxBulkExportUncompressedBytes, "uncompressed bulk export");
+
+                var bodyControlFeature = HttpContext.Features.Get<IHttpBodyControlFeature>();
+                if (bodyControlFeature != null)
+                    bodyControlFeature.AllowSynchronousIO = true;
+
+                using var limitedResponseStream = new BudgetedWriteStream(Response.Body, compressedBudget, leaveOpen: true);
+                using (var archive = new ZipArchive(limitedResponseStream, ZipArchiveMode.Create, leaveOpen: true))
+                {
+                    foreach (var dbname in tableNames)
                     {
+                        cancellationToken.ThrowIfCancellationRequested();
+
+                        IDBCDStorage storage;
                         try
                         {
                             var cleanName = dbname.ToLower();
-
-                            var storage = await GetStorage(cleanName, build, useHotfixes, locale);
-
-                            using (var exportStream = new ReadOnlyMemoryStream(await GenerateCSVStream(storage, DefaultParameters, newLinesInStrings)))
-                            {
-                                var entryname = cleanName + ".csv";
-                                var entry = archive.CreateEntry(entryname);
-                                using (var entryStream = entry.Open())
-                                {
-                                    exportStream.CopyTo(entryStream);
-                                }
-                            }
+                            storage = await GetStorage(cleanName, build, useHotfixes, locale);
+                        }
+                        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                        {
+                            throw;
                         }
                         catch (FileNotFoundException)
                         {
                             Console.WriteLine("Table " + dbname + " not found in build " + build);
+                            continue;
                         }
                         catch (Exception e)
                         {
                             Console.WriteLine("Error " + e.Message + " occured when getting table " + dbname + " of build " + build);
+                            continue;
+                        }
+
+                        cancellationToken.ThrowIfCancellationRequested();
+
+                        var entryname = dbname.ToLower() + ".csv";
+                        var entry = archive.CreateEntry(entryname, CompressionLevel.Fastest);
+                        using (var entryStream = entry.Open())
+                        using (var limitedEntryStream = new BudgetedWriteStream(entryStream, uncompressedBudget, leaveOpen: true))
+                        {
+                            await WriteCSVStream(limitedEntryStream, storage, DefaultParameters, newLinesInStrings, cancellationToken);
                         }
                     }
                 }
 
-                return new FileContentResult(zip.ToArray(), "application/octet-stream")
-                {
-                    FileDownloadName = "alldbc-" + build + "-" + locale + ".zip"
-                };
+                await limitedResponseStream.FlushAsync(cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                HttpContext.Abort();
+            }
+            catch (ExportLimitExceededException e)
+            {
+                Console.WriteLine("Bulk DBC export aborted: " + e.Message);
+                HttpContext.Abort();
+            }
+            catch (Exception e) when (Response.HasStarted)
+            {
+                Console.WriteLine("Bulk DBC export aborted after the response started: " + e.Message);
+                HttpContext.Abort();
+            }
+            finally
+            {
+                BulkExportGate.Release();
             }
         }
 
@@ -284,5 +355,81 @@ namespace wow.tools.Local.Controllers
         {
             return StringToCSVCell(str.Replace("\n", "").Replace("\r", ""));
         }
+
+        private sealed class ByteBudget(long limit, string description)
+        {
+            private long bytesWritten;
+
+            public void Reserve(int byteCount)
+            {
+                if (byteCount > limit - bytesWritten)
+                    throw new ExportLimitExceededException($"The {description} exceeded its {limit}-byte limit.");
+
+                bytesWritten += byteCount;
+            }
+        }
+
+        private sealed class BudgetedWriteStream(Stream inner, ByteBudget budget, bool leaveOpen) : Stream
+        {
+            public override bool CanRead => false;
+            public override bool CanSeek => false;
+            public override bool CanWrite => inner.CanWrite;
+            public override long Length => throw new NotSupportedException();
+            public override long Position
+            {
+                get => throw new NotSupportedException();
+                set => throw new NotSupportedException();
+            }
+
+            public override void Flush() => inner.Flush();
+
+            public override Task FlushAsync(CancellationToken cancellationToken) => inner.FlushAsync(cancellationToken);
+
+            public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+            public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+
+            public override void SetLength(long value) => throw new NotSupportedException();
+
+            public override void Write(byte[] buffer, int offset, int count)
+            {
+                budget.Reserve(count);
+                inner.Write(buffer, offset, count);
+            }
+
+            public override void Write(ReadOnlySpan<byte> buffer)
+            {
+                budget.Reserve(buffer.Length);
+                inner.Write(buffer);
+            }
+
+            public override Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+            {
+                budget.Reserve(count);
+                return inner.WriteAsync(buffer, offset, count, cancellationToken);
+            }
+
+            public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
+            {
+                budget.Reserve(buffer.Length);
+                return inner.WriteAsync(buffer, cancellationToken);
+            }
+
+            public override void WriteByte(byte value)
+            {
+                budget.Reserve(1);
+                inner.WriteByte(value);
+            }
+
+            protected override void Dispose(bool disposing)
+            {
+                if (disposing && !leaveOpen)
+                    inner.Dispose();
+
+                base.Dispose(disposing);
+            }
+        }
+
+        private sealed class ExportLimitExceededException(string message) : IOException(message);
     }
 }
