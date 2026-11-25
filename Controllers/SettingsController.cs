@@ -11,7 +11,7 @@ namespace wow.tools.local.Controllers
         [HttpGet]
         public List<WTLSetting> List()
         {
-            return SettingsManager.GetPersistentSettings();
+            return SettingsManager.GetPublicPersistentSettings();
         }
 
         [Route("save")]
@@ -24,7 +24,18 @@ namespace wow.tools.local.Controllers
 
             foreach (var setting in SettingsManager.GetPersistentSettings())
             {
-                if (newSettings.TryGetValue(setting.Key, out var newSetting) && newSetting != "null" && !string.IsNullOrEmpty(newSetting))
+                if (!newSettings.TryGetValue(setting.Key, out var newSetting))
+                {
+                    if (!setting.Sensitive)
+                        setting.Value = setting.DefaultValue;
+
+                    continue;
+                }
+
+                if (SettingsManager.IsRedactedValue(setting.Key, newSetting))
+                    continue;
+
+                if (newSetting != "null" && !string.IsNullOrEmpty(newSetting))
                 {
                     if (setting.Type == "bool")
                     {
@@ -76,7 +87,7 @@ namespace wow.tools.local.Controllers
         [HttpGet]
         public string Get([FromQuery] string key)
         {
-            return SettingsManager.Settings.TryGetValue(key, out var value) ? value.Value.ToString() : "";
+            return SettingsManager.GetPublicSettingValue(key);
         }
     }
 }

@@ -84,7 +84,7 @@
                 output += "<tr>";
                 output += "<td><label for='field_" + setting.key + "'>" + setting.key + "</label></td>";
                 var type = "text";
-                if (setting.key == "bnetClientSecret")
+                if (setting.sensitive)
                     type = "password";
 
                 var currentSetting = setting.value;

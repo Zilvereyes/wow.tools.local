@@ -14,6 +14,7 @@ namespace wow.tools.local
         public required string DefaultValue { get; init; } // default value for the setting
         public required string Value { get; set; }
         public bool Ephemeral { get; set; } // ephemeral settings shouldn't persist between sessions
+        public bool Sensitive { get; init; } // sensitive settings must not be returned by the settings API
     };
 
 
@@ -40,11 +41,13 @@ namespace wow.tools.local
             {"tagRepo", new WTLSetting { Key = "tagRepo", Value = string.Empty, Description = "Path to the wow-filetags repository.", Type = "string", DefaultValue = string.Empty } },
             {"readOnly", new WTLSetting { Key = "readOnly", Value = "false", Description = "Whether to operate in read-only mode. Disables various functionality.", Type = "bool", DefaultValue = "false" }},
             {"bnetClientID", new WTLSetting { Key = "bnetClientID", Value = string.Empty, Description = "Battle.net Web API client ID (used for file naming only).", Type = "string", DefaultValue = string.Empty }},
-            {"bnetClientSecret", new WTLSetting { Key = "bnetClientSecret", Value = string.Empty, Description = "Battle.net Web API client secret (used for file naming only).", Type = "string", DefaultValue = string.Empty }},
+            {"bnetClientSecret", new WTLSetting { Key = "bnetClientSecret", Value = string.Empty, Description = "Battle.net Web API client secret (used for file naming only).", Type = "string", DefaultValue = string.Empty, Sensitive = true }},
             {"useWago", new WTLSetting { Key = "useWago", Value = "true", Description = "Whether to use wago.tools to load older versions of specific files, loads the build in TACTSharp if disabled.", Type = "bool", DefaultValue = "true" } },
-            {"proxy", new WTLSetting { Key = "proxy", Value = string.Empty, Description = "Proxy used for all outgoing HTTP(S) requests, e.g. http://host:port, socks5://host:port or http://user:pass@host:port. If empty, .NET defaults are used. Set to 'none' to never use a proxy, even if one is set in the environment. Requires a restart.", Type = "string", DefaultValue = string.Empty }},
+            {"proxy", new WTLSetting { Key = "proxy", Value = string.Empty, Description = "Proxy used for all outgoing HTTP(S) requests, e.g. http://host:port, socks5://host:port or http://user:pass@host:port. If empty, .NET defaults are used. Set to 'none' to never use a proxy, even if one is set in the environment. Requires a restart.", Type = "string", DefaultValue = string.Empty, Sensitive = true }},
             {"useTACTChannels", new WTLSetting { Key = "useTACTChannels", Value = "false", Description = "Whether to use TACTChannels for version retrieval.", Type = "bool", DefaultValue = "false" }},
         };
+
+        public const string RedactedValue = "********";
 
         private static RootInstance.LocaleFlags tactLocale;
 
@@ -305,6 +308,9 @@ namespace wow.tools.local
 
         public static (bool, string) ValidateSetting(string key, string? value)
         {
+            if (IsRedactedValue(key, value))
+                return (true, string.Empty);
+
             switch (key)
             {
                 case "wowProduct":
@@ -463,6 +469,25 @@ namespace wow.tools.local
         {
             // don't include ephemeral settings in the persistent settings
             return Settings.Values.Where(x => !x.Ephemeral).ToList();
+        }
+
+        public static List<WTLSetting> GetPublicPersistentSettings()
+        {
+            return GetPersistentSettings()
+                .Select(setting => setting.Sensitive
+                    ? setting with { Value = RedactedValue, DefaultValue = RedactedValue }
+                    : setting)
+                .ToList();
+        }
+
+        public static string GetPublicSettingValue(string key)
+        {
+            return Settings.TryGetValue(key, out var setting) && !setting.Sensitive ? setting.Value : string.Empty;
+        }
+
+        public static bool IsRedactedValue(string key, string? value)
+        {
+            return value == RedactedValue && Settings.TryGetValue(key, out var setting) && setting.Sensitive;
         }
     }
 }
