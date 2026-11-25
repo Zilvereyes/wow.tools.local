@@ -17,6 +17,7 @@ namespace wow.tools.local.Services
         public static int LoadID = 0;
         public static readonly Lock LoadLock = new Lock();
         private static readonly HttpClient WebClient = new();
+        private const long MaxListfileBytes = 512L * 1024 * 1024;
 
         public static uint CachedLookupCount = 0;
 
@@ -64,6 +65,10 @@ namespace wow.tools.local.Services
                     sw.Restart();
                     Console.WriteLine("Downloading listfile");
 
+                    var listfileContents = SafeRemoteFile.DownloadAsync(SettingsManager.ListfileURL, MaxListfileBytes).GetAwaiter().GetResult();
+                    if (!IsValidListfile(listfileContents))
+                        throw new InvalidDataException("Downloaded listfile does not contain valid CSV records.");
+
                     if (shouldBackup)
                     {
                         if (File.Exists(listfileName + ".bak"))
@@ -73,9 +78,7 @@ namespace wow.tools.local.Services
                         Console.WriteLine("Existing " + listfileName + " renamed to " + listfileName + ".bak");
                     }
 
-                    using var s = WebClient.GetStreamAsync(SettingsManager.ListfileURL).Result;
-                    using var fs = new FileStream(listfileName, FileMode.Create);
-                    s.CopyTo(fs);
+                    File.WriteAllBytes(listfileName, listfileContents);
                     sw.Stop();
                     Console.WriteLine("Listfile download completed in " + sw.Elapsed.TotalSeconds + " seconds");
                 }
@@ -102,6 +105,29 @@ namespace wow.tools.local.Services
             }
 
             return [.. listfileLines];
+        }
+
+        private static bool IsValidListfile(byte[] contents)
+        {
+            using var reader = new StreamReader(new MemoryStream(contents));
+            var hasRecord = false;
+
+            while (reader.ReadLine() is string line)
+            {
+                if (string.IsNullOrEmpty(line))
+                    continue;
+
+                var separator = line.IndexOf(';');
+                if (separator < 0)
+                    continue;
+
+                if (separator == 0 || !int.TryParse(line.AsSpan(0, separator), NumberStyles.None, CultureInfo.InvariantCulture, out _))
+                    return false;
+
+                hasRecord = true;
+            }
+
+            return hasRecord;
         }
 
         public static Dictionary<int, string> GetAllNames()

@@ -1,4 +1,5 @@
-﻿using Microsoft.AspNetCore.Mvc;
+﻿using Microsoft.AspNetCore.Antiforgery;
+using Microsoft.AspNetCore.Mvc;
 
 namespace wow.tools.local.Controllers
 {
@@ -10,11 +11,12 @@ namespace wow.tools.local.Controllers
         [HttpGet]
         public List<WTLSetting> List()
         {
-            return SettingsManager.GetPersistentSettings();
+            return SettingsManager.GetPublicPersistentSettings();
         }
 
         [Route("save")]
         [HttpPost]
+        [ValidateAntiForgeryToken]
         public IActionResult Save([FromForm] Dictionary<string, string> newSettings)
         {
             if (SettingsManager.ReadOnly)
@@ -22,7 +24,18 @@ namespace wow.tools.local.Controllers
 
             foreach (var setting in SettingsManager.GetPersistentSettings())
             {
-                if (newSettings.TryGetValue(setting.Key, out var newSetting) && newSetting != "null" && !string.IsNullOrEmpty(newSetting))
+                if (!newSettings.TryGetValue(setting.Key, out var newSetting))
+                {
+                    if (!setting.Sensitive)
+                        setting.Value = setting.DefaultValue;
+
+                    continue;
+                }
+
+                if (SettingsManager.IsRedactedValue(setting.Key, newSetting))
+                    continue;
+
+                if (newSetting != "null" && !string.IsNullOrEmpty(newSetting))
                 {
                     if (setting.Type == "bool")
                     {
@@ -42,6 +55,14 @@ namespace wow.tools.local.Controllers
             // Save the updated settings to the config file
             SettingsManager.SaveSettings();
             return Ok();
+        }
+
+        [Route("antiforgery")]
+        [HttpGet]
+        public IActionResult Antiforgery([FromServices] IAntiforgery antiforgery)
+        {
+            var tokens = antiforgery.GetAndStoreTokens(HttpContext);
+            return Ok(new { token = tokens.RequestToken });
         }
 
         [Route("check")]
@@ -66,7 +87,7 @@ namespace wow.tools.local.Controllers
         [HttpGet]
         public string Get([FromQuery] string key)
         {
-            return SettingsManager.Settings.TryGetValue(key, out var value) ? value.Value.ToString() : "";
+            return SettingsManager.GetPublicSettingValue(key);
         }
     }
 }

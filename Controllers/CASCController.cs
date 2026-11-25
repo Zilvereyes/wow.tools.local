@@ -31,6 +31,33 @@ namespace wow.tools.local.Controllers
         private static readonly Lock moreInfoInitLock = new Lock();
         private static readonly TimeSpan buildSwitchTimeout = TimeSpan.FromMinutes(5);
 
+        private static string GenerateDiff(string oldPath, string newPath)
+        {
+            try
+            {
+                var workingDirectory = Directory.GetCurrentDirectory();
+                using Process p = new();
+                p.StartInfo.UseShellExecute = false;
+                p.StartInfo.RedirectStandardOutput = true;
+                p.StartInfo.FileName = "git";
+                p.StartInfo.WorkingDirectory = workingDirectory;
+                p.StartInfo.ArgumentList.Add("diff");
+                p.StartInfo.ArgumentList.Add("--no-index");
+                p.StartInfo.ArgumentList.Add("--");
+                p.StartInfo.ArgumentList.Add(Path.GetRelativePath(workingDirectory, oldPath));
+                p.StartInfo.ArgumentList.Add(Path.GetRelativePath(workingDirectory, newPath));
+                p.Start();
+                string output = p.StandardOutput.ReadToEnd();
+                p.WaitForExit();
+                return output;
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine("Error generating diff: " + e.Message);
+                return "Error generating diff: " + e.Message;
+            }
+        }
+
         [Route("fdid")]
         [HttpGet]
         public ActionResult File(uint fileDataID, string filename = "", string build = "")
@@ -195,7 +222,8 @@ namespace wow.tools.local.Controllers
         }
 
         [Route("updateListfile")]
-        [HttpGet]
+        [HttpPost]
+        [ValidateAntiForgeryToken]
         public async Task<bool> UpdateListfile()
         {
             if (SettingsManager.ReadOnly)
@@ -251,7 +279,8 @@ namespace wow.tools.local.Controllers
         }
 
         [Route("updateTACTKeys")]
-        [HttpGet]
+        [HttpPost]
+        [ValidateAntiForgeryToken]
         public async Task<bool> UpdateTACTKeys()
         {
             if (SettingsManager.ReadOnly)
@@ -1631,50 +1660,37 @@ namespace wow.tools.local.Controllers
         [HttpGet]
         public string DiffText(int fileDataID, string from, string to)
         {
-            if (!Directory.Exists("temp/diffs/" + from))
-                Directory.CreateDirectory("temp/diffs/" + from);
-
             if (!Listfile.Types.TryGetValue(fileDataID, out var fileType))
                 fileType = "txt";
+
+            var fileName = fileDataID + "." + fileType;
+            if (!CASC.TryGetBuildFilePath(from, true, fileName, out var oldPath) ||
+                !CASC.TryGetBuildFilePath(to, true, fileName, out var newPath))
+                return "Invalid build";
+
+            Directory.CreateDirectory(Path.GetDirectoryName(oldPath)!);
 
             var oldFile = CASC.GetFileByID((uint)fileDataID, from);
             if (oldFile == null)
                 return "Error loading file " + fileDataID + " from build";
 
-            using (var fs = new FileStream("temp/diffs/" + from + "/" + fileDataID + "." + fileType, FileMode.Create))
+            using (var fs = new FileStream(oldPath, FileMode.Create))
             {
                 oldFile.CopyTo(fs);
             }
 
-            if (!Directory.Exists("temp/diffs/" + to))
-                Directory.CreateDirectory("temp/diffs/" + to);
+            Directory.CreateDirectory(Path.GetDirectoryName(newPath)!);
 
             var newFile = CASC.GetFileByID((uint)fileDataID, to);
             if (newFile == null)
                 return "Error loading file " + fileDataID + " from build";
 
-            using (var fs = new FileStream("temp/diffs/" + to + "/" + fileDataID + "." + fileType, FileMode.Create))
+            using (var fs = new FileStream(newPath, FileMode.Create))
             {
                 newFile.CopyTo(fs);
             }
 
-            try
-            {
-                Process p = new();
-                p.StartInfo.UseShellExecute = false;
-                p.StartInfo.RedirectStandardOutput = true;
-                p.StartInfo.FileName = "git";
-                p.StartInfo.Arguments = "diff --no-index temp/diffs/" + from + "/" + fileDataID + "." + fileType + " temp/diffs/" + to + "/" + fileDataID + "." + fileType;
-                p.Start();
-                string output = p.StandardOutput.ReadToEnd();
-                p.WaitForExit();
-                return output;
-            }
-            catch (Exception e)
-            {
-                Console.WriteLine("Error generating diff: " + e.Message);
-                return "Error generating diff: " + e.Message;
-            }
+            return GenerateDiff(oldPath, newPath);
         }
 
         [Route("reloadBuilds")]
@@ -1805,37 +1821,23 @@ namespace wow.tools.local.Controllers
         }
 
         [Route("checkFiles")]
-        [HttpPost]
-        public async Task<string> CheckFiles()
-        {
-            string rawContent = string.Empty;
-            using (var reader = new StreamReader(Request.Body, encoding: Encoding.UTF8))
-                rawContent = await reader.ReadToEndAsync();
-
-            var filenames = rawContent.Split("\n").ToList();
-            var unknownFDIDs = Listfile.NameMap.Where(x => x.Value == "").Select(x => x.Key).ToList();
-            var reverseLookup = Listfile.LookupMap.ToDictionary(x => x.Value, x => x.Key);
-            var hasher = new TACTSharp.Jenkins96();
-            var results = new List<string>();
-            foreach (var filename in filenames)
-            {
-                var lookup = hasher.ComputeHash(filename.Trim());
-                if (reverseLookup.TryGetValue(lookup, out var unkFDID))
-                {
-                    results.Add(unkFDID + ";" + filename);
-                }
-            }
-            return string.Join('\n', results);
-        }
-
         [Route("checkFilesFromFile")]
-        [HttpGet]
-        public string CheckFilesFromFile(string file = "")
+        [HttpPost]
+        [Consumes("text/plain")]
+        [RequestSizeLimit(BoundedTextRequest.MaxBodyBytes)]
+        public async Task<ActionResult<string>> CheckFiles(CancellationToken cancellationToken)
         {
-            if (SettingsManager.ReadOnly)
-                return "";
+            if (!BoundedTextRequest.HasRequiredHeader(Request))
+                return StatusCode(StatusCodes.Status403Forbidden);
 
-            var filenames = System.IO.File.ReadAllLines(file);
+            var body = await BoundedTextRequest.ReadLinesAsync(Request.Body, Request.ContentLength, cancellationToken);
+            if (body.Status == BoundedTextRequestStatus.InvalidEncoding)
+                return BadRequest("The request body must be valid text.");
+
+            if (body.Status != BoundedTextRequestStatus.Success)
+                return StatusCode(StatusCodes.Status413PayloadTooLarge, "The request body exceeds the allowed limits.");
+
+            var filenames = body.Lines!;
             var unknownFDIDs = Listfile.NameMap.Where(x => x.Value == "").Select(x => x.Key).ToList();
             var reverseLookup = Listfile.LookupMap.ToDictionary(x => x.Value, x => x.Key);
             var hasher = new TACTSharp.Jenkins96();
@@ -2138,72 +2140,42 @@ namespace wow.tools.local.Controllers
         [HttpGet]
         public string JsonDiff(uint fileDataID, string from, string to)
         {
+            var fileName = fileDataID + ".json";
+            if (!CASC.TryGetBuildFilePath(from, true, fileName, out var oldPath) ||
+                !CASC.TryGetBuildFilePath(to, true, fileName, out var newPath))
+                return "Invalid build";
+
             var oldJson = Json(fileDataID, from);
             var newJson = Json(fileDataID, to);
 
-            if (!Directory.Exists("temp/diffs/" + from))
-                Directory.CreateDirectory("temp/diffs/" + from);
+            Directory.CreateDirectory(Path.GetDirectoryName(oldPath)!);
+            System.IO.File.WriteAllText(oldPath, oldJson);
 
-            System.IO.File.WriteAllText("temp/diffs/" + from + "/" + fileDataID + ".json", oldJson);
+            Directory.CreateDirectory(Path.GetDirectoryName(newPath)!);
+            System.IO.File.WriteAllText(newPath, newJson);
 
-            if (!Directory.Exists("temp/diffs/" + to))
-                Directory.CreateDirectory("temp/diffs/" + to);
-
-            System.IO.File.WriteAllText("temp/diffs/" + to + "/" + fileDataID + ".json", newJson);
-
-            try
-            {
-                Process p = new();
-                p.StartInfo.UseShellExecute = false;
-                p.StartInfo.RedirectStandardOutput = true;
-                p.StartInfo.FileName = "git";
-                p.StartInfo.Arguments = "diff --no-index temp/diffs/" + from + "/" + fileDataID + ".json" + " temp/diffs/" + to + "/" + fileDataID + ".json";
-                p.Start();
-                string output = p.StandardOutput.ReadToEnd();
-                p.WaitForExit();
-                return output;
-            }
-            catch (Exception e)
-            {
-                Console.WriteLine("Error generating diff: " + e.Message);
-                return "Error generating diff: " + e.Message;
-            }
+            return GenerateDiff(oldPath, newPath);
         }
 
         [Route("diffHex")]
         [HttpGet]
         public string HexDiff(uint fileDataID, string from, string to)
         {
+            var fileName = fileDataID + ".hexdump";
+            if (!CASC.TryGetBuildFilePath(from, true, fileName, out var oldPath) ||
+                !CASC.TryGetBuildFilePath(to, true, fileName, out var newPath))
+                return "Invalid build";
+
             var oldJson = Hex(fileDataID, from);
             var newJson = Hex(fileDataID, to);
 
-            if (!Directory.Exists("temp/diffs/" + from))
-                Directory.CreateDirectory("temp/diffs/" + from);
+            Directory.CreateDirectory(Path.GetDirectoryName(oldPath)!);
+            System.IO.File.WriteAllText(oldPath, oldJson);
 
-            System.IO.File.WriteAllText("temp/diffs/" + from + "/" + fileDataID + ".hexdump", oldJson);
+            Directory.CreateDirectory(Path.GetDirectoryName(newPath)!);
+            System.IO.File.WriteAllText(newPath, newJson);
 
-            if (!Directory.Exists("temp/diffs/" + to))
-                Directory.CreateDirectory("temp/diffs/" + to);
-
-            System.IO.File.WriteAllText("temp/diffs/" + to + "/" + fileDataID + ".hexdump", newJson);
-
-            try
-            {
-                Process p = new();
-                p.StartInfo.UseShellExecute = false;
-                p.StartInfo.RedirectStandardOutput = true;
-                p.StartInfo.FileName = "git";
-                p.StartInfo.Arguments = "diff --no-index temp/diffs/" + from + "/" + fileDataID + ".hexdump" + " temp/diffs/" + to + "/" + fileDataID + ".hexdump";
-                p.Start();
-                string output = p.StandardOutput.ReadToEnd();
-                p.WaitForExit();
-                return output;
-            }
-            catch (Exception e)
-            {
-                Console.WriteLine("Error generating diff: " + e.Message);
-                return "Error generating diff: " + e.Message;
-            }
+            return GenerateDiff(oldPath, newPath);
         }
 
         [Route("commonBLPs")]

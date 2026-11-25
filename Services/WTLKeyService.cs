@@ -1,9 +1,11 @@
-﻿namespace wow.tools.local.Services
+﻿using System.Globalization;
+
+namespace wow.tools.local.Services
 {
     public class WTLKeyService
     {
         public static readonly List<ulong> KnownKeys = new();
-        private static readonly HttpClient WebClient = new();
+        private const long MaxKeyFileBytes = 16L * 1024 * 1024;
 
         public static bool TryGetKey(ulong keyName, out byte[] key)
         {
@@ -55,9 +57,11 @@
 
             foreach (var line in File.ReadAllLines("WoW.txt"))
             {
-                var splitLine = line.Split(' ');
-                var lookup = ulong.Parse(splitLine[0], System.Globalization.NumberStyles.HexNumber);
-                byte[] key = Convert.FromHexString(splitLine[1].Trim());
+                if (string.IsNullOrWhiteSpace(line))
+                    continue;
+
+                if (!TryParseKeyLine(line, out var lookup, out var key))
+                    throw new InvalidDataException("TACT key file contains an invalid record.");
 
                 if (!KnownKeys.Contains(lookup))
                     KnownKeys.Add(lookup);
@@ -92,11 +96,15 @@
             {
                 Console.WriteLine("Downloading TACT keys");
 
-                using (var s = WebClient.GetStreamAsync(SettingsManager.TACTKeyURL + "?=v" + (long)DateTime.UtcNow.Subtract(DateTime.UnixEpoch).TotalSeconds).Result)
-                using (var fs = new FileStream("WoW.txt", FileMode.Create))
-                {
-                    s.CopyTo(fs);
-                }
+                var keyURL = new UriBuilder(SettingsManager.TACTKeyURL);
+                var cacheBuster = "v=" + (long)DateTime.UtcNow.Subtract(DateTime.UnixEpoch).TotalSeconds;
+                keyURL.Query = string.IsNullOrEmpty(keyURL.Query) ? cacheBuster : keyURL.Query.TrimStart('?') + "&" + cacheBuster;
+
+                var keyFileContents = await SafeRemoteFile.DownloadAsync(keyURL.Uri.AbsoluteUri, MaxKeyFileBytes);
+                if (!IsValidKeyFile(keyFileContents))
+                    throw new InvalidDataException("Downloaded TACT key file does not contain valid key records.");
+
+                File.WriteAllBytes("WoW.txt", keyFileContents);
             }
 
             if (CASC.IsTACTSharpInit)
@@ -109,6 +117,44 @@
             Console.WriteLine("Loaded " + KnownKeys.Count + " known TACTkeys");
 
             return true;
+        }
+
+        private static bool IsValidKeyFile(byte[] contents)
+        {
+            using var reader = new StreamReader(new MemoryStream(contents));
+            var hasKey = false;
+
+            while (reader.ReadLine() is string line)
+            {
+                if (string.IsNullOrWhiteSpace(line))
+                    continue;
+
+                if (!TryParseKeyLine(line, out _, out _))
+                    return false;
+
+                hasKey = true;
+            }
+
+            return hasKey;
+        }
+
+        private static bool TryParseKeyLine(string line, out ulong lookup, out byte[] key)
+        {
+            lookup = 0;
+            key = [];
+            var splitLine = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            if (splitLine.Length != 2 || !ulong.TryParse(splitLine[0], NumberStyles.HexNumber, CultureInfo.InvariantCulture, out lookup))
+                return false;
+
+            try
+            {
+                key = Convert.FromHexString(splitLine[1]);
+                return key.Length == 16;
+            }
+            catch (FormatException)
+            {
+                return false;
+            }
         }
 
         public static bool ExportTACTKeys()

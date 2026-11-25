@@ -84,7 +84,7 @@
                 output += "<tr>";
                 output += "<td><label for='field_" + setting.key + "'>" + setting.key + "</label></td>";
                 var type = "text";
-                if (setting.key == "bnetClientSecret")
+                if (setting.sensitive)
                     type = "password";
 
                 var currentSetting = setting.value;
@@ -263,7 +263,7 @@
             });
             
             const newSettings = new URLSearchParams(formData);
-            const saveResult = await fetch("/settings/save", { method: 'POST', body: newSettings });
+            const saveResult = await fetchWithAntiforgery("/settings/save", { body: newSettings });
             if (saveResult.ok)
                 loadServerSettings();
 

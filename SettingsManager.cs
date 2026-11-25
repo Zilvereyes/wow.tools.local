@@ -1,6 +1,7 @@
 ﻿using System.Net;
 using System.Runtime.InteropServices;
 using TACTSharp;
+using wow.tools.local.Services;
 using wow.tools.local.Utils;
 
 namespace wow.tools.local
@@ -13,6 +14,7 @@ namespace wow.tools.local
         public required string DefaultValue { get; init; } // default value for the setting
         public required string Value { get; set; }
         public bool Ephemeral { get; set; } // ephemeral settings shouldn't persist between sessions
+        public bool Sensitive { get; init; } // sensitive settings must not be returned by the settings API
     };
 
 
@@ -39,11 +41,13 @@ namespace wow.tools.local
             {"tagRepo", new WTLSetting { Key = "tagRepo", Value = string.Empty, Description = "Path to the wow-filetags repository.", Type = "string", DefaultValue = string.Empty } },
             {"readOnly", new WTLSetting { Key = "readOnly", Value = "false", Description = "Whether to operate in read-only mode. Disables various functionality.", Type = "bool", DefaultValue = "false" }},
             {"bnetClientID", new WTLSetting { Key = "bnetClientID", Value = string.Empty, Description = "Battle.net Web API client ID (used for file naming only).", Type = "string", DefaultValue = string.Empty }},
-            {"bnetClientSecret", new WTLSetting { Key = "bnetClientSecret", Value = string.Empty, Description = "Battle.net Web API client secret (used for file naming only).", Type = "string", DefaultValue = string.Empty }},
+            {"bnetClientSecret", new WTLSetting { Key = "bnetClientSecret", Value = string.Empty, Description = "Battle.net Web API client secret (used for file naming only).", Type = "string", DefaultValue = string.Empty, Sensitive = true }},
             {"useWago", new WTLSetting { Key = "useWago", Value = "true", Description = "Whether to use wago.tools to load older versions of specific files, loads the build in TACTSharp if disabled.", Type = "bool", DefaultValue = "true" } },
-            {"proxy", new WTLSetting { Key = "proxy", Value = string.Empty, Description = "Proxy used for all outgoing HTTP(S) requests, e.g. http://host:port, socks5://host:port or http://user:pass@host:port. If empty, .NET defaults are used. Set to 'none' to never use a proxy, even if one is set in the environment. Requires a restart.", Type = "string", DefaultValue = string.Empty }},
+            {"proxy", new WTLSetting { Key = "proxy", Value = string.Empty, Description = "Proxy used for all outgoing HTTP(S) requests, e.g. http://host:port, socks5://host:port or http://user:pass@host:port. If empty, .NET defaults are used. Set to 'none' to never use a proxy, even if one is set in the environment. Requires a restart.", Type = "string", DefaultValue = string.Empty, Sensitive = true }},
             {"useTACTChannels", new WTLSetting { Key = "useTACTChannels", Value = "false", Description = "Whether to use TACTChannels for version retrieval.", Type = "bool", DefaultValue = "false" }},
         };
+
+        public const string RedactedValue = "********";
 
         private static RootInstance.LocaleFlags tactLocale;
 
@@ -291,8 +295,22 @@ namespace wow.tools.local
                 WoWFolder = string.Empty; // reset if the detected folder is invalid
         }
 
+        private static bool IsValidRemoteFileURL(string? value, params string[] allowedExtensions)
+        {
+            return Uri.TryCreate(value, UriKind.Absolute, out var uri)
+                && (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps)
+                && string.IsNullOrEmpty(uri.Fragment)
+                && !uri.DnsSafeHost.Equals("localhost", StringComparison.OrdinalIgnoreCase)
+                && !uri.DnsSafeHost.EndsWith(".localhost", StringComparison.OrdinalIgnoreCase)
+                && (!IPAddress.TryParse(uri.DnsSafeHost, out var address) || SafeRemoteFile.IsPublicAddress(address))
+                && allowedExtensions.Any(extension => uri.AbsolutePath.EndsWith(extension, StringComparison.OrdinalIgnoreCase));
+        }
+
         public static (bool, string) ValidateSetting(string key, string? value)
         {
+            if (IsRedactedValue(key, value))
+                return (true, string.Empty);
+
             switch (key)
             {
                 case "wowProduct":
@@ -330,18 +348,18 @@ namespace wow.tools.local
                     else
                         return (false, "Invalid path to definitions directory (must contain a Map.dbd)");
                 case "listfileURL":
-                    if (Uri.TryCreate(value, UriKind.Absolute, out var listfileURIResult) && (listfileURIResult.Scheme == Uri.UriSchemeHttp || listfileURIResult.Scheme == Uri.UriSchemeHttps) && value.EndsWith(".csv"))
+                    if (IsValidRemoteFileURL(value, ".csv"))
                         return (true, string.Empty);
                     else
                         if (Directory.Exists(value) && File.Exists(Path.Combine(value, "placeholder.csv")))
                             return (true, string.Empty);
                         else
-                            return (false, "Invalid listfile URL (must be a valid link and end in .csv) or invalid path to parts (directory must contain placeholder.csv)");
+                            return (false, "Invalid listfile URL (must use HTTP(S), have a public host, have no fragment, and have a path ending in .csv) or invalid path to parts (directory must contain placeholder.csv)");
                 case "tactKeyURL":
-                    if (Uri.TryCreate(value, UriKind.Absolute, out var tcURIResult) && (tcURIResult.Scheme == Uri.UriSchemeHttp || tcURIResult.Scheme == Uri.UriSchemeHttps) && (value.EndsWith(".txt") || value.EndsWith(".csv")))
+                    if (IsValidRemoteFileURL(value, ".txt", ".csv"))
                         return (true, string.Empty);
                     else
-                        return (false, "Invalid TACT key list URL (must end in .txt or .csv)");
+                        return (false, "Invalid TACT key list URL (must use HTTP(S), have a public host, have no fragment, and have a path ending in .txt or .csv)");
                 case "additionalCDNs":
                     if (string.IsNullOrEmpty(value))
                         return (true, string.Empty);
@@ -451,6 +469,25 @@ namespace wow.tools.local
         {
             // don't include ephemeral settings in the persistent settings
             return Settings.Values.Where(x => !x.Ephemeral).ToList();
+        }
+
+        public static List<WTLSetting> GetPublicPersistentSettings()
+        {
+            return GetPersistentSettings()
+                .Select(setting => setting.Sensitive
+                    ? setting with { Value = RedactedValue, DefaultValue = RedactedValue }
+                    : setting)
+                .ToList();
+        }
+
+        public static string GetPublicSettingValue(string key)
+        {
+            return Settings.TryGetValue(key, out var setting) && !setting.Sensitive ? setting.Value : string.Empty;
+        }
+
+        public static bool IsRedactedValue(string key, string? value)
+        {
+            return value == RedactedValue && Settings.TryGetValue(key, out var setting) && setting.Sensitive;
         }
     }
 }

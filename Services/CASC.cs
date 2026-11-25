@@ -67,24 +67,51 @@ namespace wow.tools.local.Services
         }
 
         private static readonly HttpClient WebClient = new();
+        private static readonly StringComparison PathComparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
 
         public static BuildInstance? buildInstance;
 
-        public static async Task<bool> InitTACT(string wowFolder, string product, string overrideBC = "", string overrideCDNC = "", CancellationToken cancellationToken = default)
+        private static bool IsKnownBuildIdentifier(string build)
         {
-            await TACTInitLock.WaitAsync(cancellationToken);
+            var versionParts = build.Split('.');
+            if (versionParts.Length != 4 || versionParts.Any(part => part.Length == 0 || !part.All(char.IsAsciiDigit)))
+                return false;
+
+            return build == BuildName || SQLiteDB.GetBuildInfoByVersion(build) != null;
+        }
+
+        public static bool TryGetBuildFilePath(string? build, bool isDiff, string fileName, out string filePath)
+        {
+            filePath = string.Empty;
+
+            if (string.IsNullOrEmpty(build) || string.IsNullOrEmpty(fileName) || !IsKnownBuildIdentifier(build))
+                return false;
 
             try
             {
-                return await InitTACTCore(product, overrideBC, overrideCDNC);
+                var rootPath = Path.GetFullPath(isDiff ? Path.Combine("temp", "diffs") : "temp");
+                var buildPath = Path.GetFullPath(Path.Combine(rootPath, build));
+                var rootPrefix = Path.EndsInDirectorySeparator(rootPath) ? rootPath : rootPath + Path.DirectorySeparatorChar;
+
+                if (!buildPath.StartsWith(rootPrefix, PathComparison))
+                    return false;
+
+                var candidatePath = Path.GetFullPath(Path.Combine(buildPath, fileName));
+                var buildPrefix = Path.EndsInDirectorySeparator(buildPath) ? buildPath : buildPath + Path.DirectorySeparatorChar;
+
+                if (!candidatePath.StartsWith(buildPrefix, PathComparison))
+                    return false;
+
+                filePath = candidatePath;
+                return true;
             }
-            finally
+            catch (Exception e) when (e is ArgumentException or NotSupportedException or PathTooLongException)
             {
-                TACTInitLock.Release();
+                return false;
             }
         }
 
-        private static async Task<bool> InitTACTCore(string product, string overrideBC, string overrideCDNC)
+        public static async void InitTACT(string wowFolder, string product, string overrideBC = "", string overrideCDNC = "")
         {
             IsTACTSharpInit = false;
 
@@ -520,6 +547,16 @@ namespace wow.tools.local.Services
 
         public static Stream? GetFileByID(uint filedataid, string? build = null, LocaleFlags locale = LocaleFlags.All_WoW)
         {
+            return GetFileByIDInternal(filedataid, build, locale, null);
+        }
+
+        public static Stream? GetFileByID(uint filedataid, long maxDecodedSize, string? build = null, LocaleFlags locale = LocaleFlags.All_WoW)
+        {
+            return GetFileByIDInternal(filedataid, build, locale, maxDecodedSize);
+        }
+
+        private static Stream? GetFileByIDInternal(uint filedataid, string? build, LocaleFlags locale, long? maxDecodedSize)
+        {
             if (string.IsNullOrEmpty(build))
                 build = BuildName;
 
@@ -550,6 +587,19 @@ namespace wow.tools.local.Services
                             preferredEntry = rootEntries.First();
                     }
 
+                    if (maxDecodedSize.HasValue)
+                    {
+                        if (maxDecodedSize.Value < 0)
+                            throw new ArgumentOutOfRangeException(nameof(maxDecodedSize));
+
+                        var encodingEntry = buildInstance.Encoding!.FindContentKey(preferredEntry.md5);
+                        if (encodingEntry == false)
+                            throw new InvalidDataException("Unable to determine the decoded file size before retrieval");
+
+                        if (encodingEntry.DecodedFileSize > (ulong)maxDecodedSize.Value)
+                            throw new InvalidDataException("File exceeds the remaining decoded-size limit");
+                    }
+
                     byte[]? fileBytes = null;
 
                     try
@@ -576,18 +626,18 @@ namespace wow.tools.local.Services
             {
                 try
                 {
-                    if (!Directory.Exists("temp"))
-                        Directory.CreateDirectory("temp");
+                    if (!TryGetBuildFilePath(build, false, filedataid.ToString(), out var cacheFilePath))
+                        return null;
 
-                    if (!Directory.Exists("temp/" + build))
-                        Directory.CreateDirectory("temp/" + build);
+                    Directory.CreateDirectory(Path.GetDirectoryName(cacheFilePath)!);
 
-                    if (!File.Exists("temp/" + build + "/" + filedataid))
+                    if (!File.Exists(cacheFilePath))
                     {
                         if (SettingsManager.UseWago)
                         {
-                            var stream = WebClient.GetStreamAsync("https://wago.tools/api/casc/" + filedataid + "/?version=" + build + "&download").Result;
-                            using (var fs = new FileStream("temp/" + build + "/" + filedataid, FileMode.Create))
+                            var requestUri = "https://wago.tools/api/casc/" + filedataid + "/?version=" + Uri.EscapeDataString(build) + "&download";
+                            var stream = WebClient.GetStreamAsync(requestUri).Result;
+                            using (var fs = new FileStream(cacheFilePath, FileMode.Create))
                             {
                                 stream.CopyTo(fs);
                                 fs.Close();
@@ -597,7 +647,7 @@ namespace wow.tools.local.Services
                         {
                             var buildInstance = BuildManager.GetBuildByVersion(build);
                             using (var ms = new ReadOnlyMemoryStream(buildInstance.OpenFileByFDID(filedataid)))
-                            using (var fs = new FileStream("temp/" + build + "/" + filedataid, FileMode.Create))
+                            using (var fs = new FileStream(cacheFilePath, FileMode.Create))
                             {
                                 ms.CopyTo(fs);
                                 fs.Close();
@@ -605,7 +655,7 @@ namespace wow.tools.local.Services
                         }
                     }
 
-                    return new FileStream("temp/" + build + "/" + filedataid, FileMode.Open, FileAccess.Read);
+                    return new FileStream(cacheFilePath, FileMode.Open, FileAccess.Read);
                 }
                 catch (Exception e)
                 {
