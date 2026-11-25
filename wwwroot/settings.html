@@ -263,7 +263,7 @@
             });
             
             const newSettings = new URLSearchParams(formData);
-            const saveResult = await fetch("/settings/save", { method: 'POST', body: newSettings });
+            const saveResult = await fetchWithAntiforgery("/settings/save", { body: newSettings });
             if (saveResult.ok)
                 loadServerSettings();
 

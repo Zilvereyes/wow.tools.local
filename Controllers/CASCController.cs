@@ -211,7 +211,8 @@ namespace wow.tools.local.Controllers
         }
 
         [Route("updateListfile")]
-        [HttpGet]
+        [HttpPost]
+        [ValidateAntiForgeryToken]
         public async Task<bool> UpdateListfile()
         {
             if (SettingsManager.ReadOnly)
@@ -267,7 +268,8 @@ namespace wow.tools.local.Controllers
         }
 
         [Route("updateTACTKeys")]
-        [HttpGet]
+        [HttpPost]
+        [ValidateAntiForgeryToken]
         public async Task<bool> UpdateTACTKeys()
         {
             if (SettingsManager.ReadOnly)

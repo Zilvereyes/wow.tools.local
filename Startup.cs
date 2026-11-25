@@ -13,6 +13,12 @@ namespace wow.tools.local
         public void ConfigureServices(IServiceCollection services)
         {
             services.AddControllers();
+            services.AddAntiforgery(options =>
+            {
+                options.HeaderName = "X-CSRF-TOKEN";
+                options.Cookie.SameSite = SameSiteMode.Strict;
+                options.Cookie.SecurePolicy = CookieSecurePolicy.SameAsRequest;
+            });
             services.AddSingleton<IDBDProvider, DBDProvider>();
             services.AddSingleton<IDBCProvider, DBCProvider>();
             services.AddSingleton<IEnumProvider, EnumProvider>();

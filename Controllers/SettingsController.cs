@@ -1,4 +1,5 @@
-﻿using Microsoft.AspNetCore.Mvc;
+﻿using Microsoft.AspNetCore.Antiforgery;
+using Microsoft.AspNetCore.Mvc;
 
 namespace wow.tools.local.Controllers
 {
@@ -15,6 +16,7 @@ namespace wow.tools.local.Controllers
 
         [Route("save")]
         [HttpPost]
+        [ValidateAntiForgeryToken]
         public IActionResult Save([FromForm] Dictionary<string, string> newSettings)
         {
             if (SettingsManager.ReadOnly)
@@ -42,6 +44,14 @@ namespace wow.tools.local.Controllers
             // Save the updated settings to the config file
             SettingsManager.SaveSettings();
             return Ok();
+        }
+
+        [Route("antiforgery")]
+        [HttpGet]
+        public IActionResult Antiforgery([FromServices] IAntiforgery antiforgery)
+        {
+            var tokens = antiforgery.GetAndStoreTokens(HttpContext);
+            return Ok(new { token = tokens.RequestToken });
         }
 
         [Route("check")]

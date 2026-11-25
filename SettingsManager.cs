@@ -1,6 +1,7 @@
 ﻿using System.Net;
 using System.Runtime.InteropServices;
 using TACTSharp;
+using wow.tools.local.Services;
 using wow.tools.local.Utils;
 
 namespace wow.tools.local
@@ -291,6 +292,17 @@ namespace wow.tools.local
                 WoWFolder = string.Empty; // reset if the detected folder is invalid
         }
 
+        private static bool IsValidRemoteFileURL(string? value, params string[] allowedExtensions)
+        {
+            return Uri.TryCreate(value, UriKind.Absolute, out var uri)
+                && (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps)
+                && string.IsNullOrEmpty(uri.Fragment)
+                && !uri.DnsSafeHost.Equals("localhost", StringComparison.OrdinalIgnoreCase)
+                && !uri.DnsSafeHost.EndsWith(".localhost", StringComparison.OrdinalIgnoreCase)
+                && (!IPAddress.TryParse(uri.DnsSafeHost, out var address) || SafeRemoteFile.IsPublicAddress(address))
+                && allowedExtensions.Any(extension => uri.AbsolutePath.EndsWith(extension, StringComparison.OrdinalIgnoreCase));
+        }
+
         public static (bool, string) ValidateSetting(string key, string? value)
         {
             switch (key)
@@ -330,18 +342,18 @@ namespace wow.tools.local
                     else
                         return (false, "Invalid path to definitions directory (must contain a Map.dbd)");
                 case "listfileURL":
-                    if (Uri.TryCreate(value, UriKind.Absolute, out var listfileURIResult) && (listfileURIResult.Scheme == Uri.UriSchemeHttp || listfileURIResult.Scheme == Uri.UriSchemeHttps) && value.EndsWith(".csv"))
+                    if (IsValidRemoteFileURL(value, ".csv"))
                         return (true, string.Empty);
                     else
                         if (Directory.Exists(value) && File.Exists(Path.Combine(value, "placeholder.csv")))
                             return (true, string.Empty);
                         else
-                            return (false, "Invalid listfile URL (must be a valid link and end in .csv) or invalid path to parts (directory must contain placeholder.csv)");
+                            return (false, "Invalid listfile URL (must use HTTP(S), have a public host, have no fragment, and have a path ending in .csv) or invalid path to parts (directory must contain placeholder.csv)");
                 case "tactKeyURL":
-                    if (Uri.TryCreate(value, UriKind.Absolute, out var tcURIResult) && (tcURIResult.Scheme == Uri.UriSchemeHttp || tcURIResult.Scheme == Uri.UriSchemeHttps) && (value.EndsWith(".txt") || value.EndsWith(".csv")))
+                    if (IsValidRemoteFileURL(value, ".txt", ".csv"))
                         return (true, string.Empty);
                     else
-                        return (false, "Invalid TACT key list URL (must end in .txt or .csv)");
+                        return (false, "Invalid TACT key list URL (must use HTTP(S), have a public host, have no fragment, and have a path ending in .txt or .csv)");
                 case "additionalCDNs":
                     if (string.IsNullOrEmpty(value))
                         return (true, string.Empty);
