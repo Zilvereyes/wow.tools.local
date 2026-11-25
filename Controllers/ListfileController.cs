@@ -559,14 +559,30 @@ namespace wow.tools.local.Controllers
         }
 
         [Route("extractFileList")]
-        [HttpGet]
-        public async Task<bool> ExtractFileList(string listfile, bool related = false, string exceptInBuild = "", bool byID = false)
+        [HttpPost]
+        [Consumes("text/plain")]
+        [RequestSizeLimit(BoundedTextRequest.MaxBodyBytes)]
+        public async Task<ActionResult<bool>> ExtractFileList(
+            bool related = false,
+            string exceptInBuild = "",
+            bool byID = false,
+            CancellationToken cancellationToken = default)
         {
-            if (string.IsNullOrEmpty(listfile) || SettingsManager.ReadOnly)
+            if (SettingsManager.ReadOnly)
                 return false;
 
+            if (!BoundedTextRequest.HasRequiredHeader(Request))
+                return StatusCode(StatusCodes.Status403Forbidden);
+
+            var body = await BoundedTextRequest.ReadLinesAsync(Request.Body, Request.ContentLength, cancellationToken);
+            if (body.Status == BoundedTextRequestStatus.InvalidEncoding)
+                return BadRequest(false);
+
+            if (body.Status != BoundedTextRequestStatus.Success)
+                return StatusCode(StatusCodes.Status413PayloadTooLarge, false);
+
             var listfileResults = new Dictionary<int, string>();
-            foreach (var line in System.IO.File.ReadAllLines(listfile))
+            foreach (var line in body.Lines!)
             {
                 if (string.IsNullOrEmpty(line))
                     continue;
