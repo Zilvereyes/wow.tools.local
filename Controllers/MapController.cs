@@ -12,6 +12,10 @@ namespace wow.tools.local.Controllers
     [Route("map/")]
     public class MapController(IDBCManager dbcManager) : Controller
     {
+        // The map clients render tiles from a 512-pixel base size.
+        private const int MinimumTileSize = 1;
+        private const int MaximumTileSize = 512;
+
         private readonly DBCManager dbcManager = (DBCManager)dbcManager;
 
         private readonly Dictionary<string, List<MapTile>> puzzleMapMaskCache = new Dictionary<string, List<MapTile>>();
@@ -156,12 +160,14 @@ namespace wow.tools.local.Controllers
 
         [Route("tile")]
         [HttpGet]
-        public FileStreamResult Tile(uint fileDataID, int targetSize, string adtMethod = "", string output = "raw")
+        public ActionResult<FileStreamResult> Tile(uint fileDataID, int targetSize, string adtMethod = "", string output = "raw")
         {
+            if (targetSize is < MinimumTileSize or > MaximumTileSize)
+                return BadRequest($"targetSize must be between {MinimumTileSize} and {MaximumTileSize} pixels.");
+
             if (!CASC.FileExists(fileDataID))
             {
                 var emptyImage = Image.Black(targetSize, targetSize);
-                var emptyPixels = new byte[targetSize * targetSize * 4];
                 var emptyMS = new MemoryStream();
                 emptyImage.WriteToStream(emptyMS, ".png");
                 emptyMS.Position = 0;
