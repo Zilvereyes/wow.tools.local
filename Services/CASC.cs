@@ -111,7 +111,20 @@ namespace wow.tools.local.Services
             }
         }
 
-        public static async void InitTACT(string wowFolder, string product, string overrideBC = "", string overrideCDNC = "")
+        public static async Task<bool> InitTACT(string wowFolder, string product, string overrideBC = "", string overrideCDNC = "", CancellationToken cancellationToken = default)
+        {
+            await TACTInitLock.WaitAsync(cancellationToken);
+            try
+            {
+                return await InitTACTCore(wowFolder, product, overrideBC, overrideCDNC);
+            }
+            finally
+            {
+                TACTInitLock.Release();
+            }
+        }
+
+        private static async Task<bool> InitTACTCore(string wowFolder, string product, string overrideBC, string overrideCDNC)
         {
             IsTACTSharpInit = false;
 
