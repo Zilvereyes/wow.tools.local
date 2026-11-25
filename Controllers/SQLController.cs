@@ -7,16 +7,6 @@ namespace wow.tools.local.Controllers
     [ApiController]
     public class SQLController() : Controller
     {
-        [Route("query")]
-        [HttpGet]
-        public IActionResult Query(string query)
-        {
-            if (SettingsManager.ReadOnly)
-                return Forbid();
-
-            return Ok(SQLiteDB.RunQuery(query));
-        }
-
         [Route("getCreatureName")]
         [HttpGet]
         public IActionResult GetCreatureName(int creatureID)
