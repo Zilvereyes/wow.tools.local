@@ -127,7 +127,7 @@
             var button = document.getElementById("updateTACTKeysButton");
             button.innerHTML = "<i class='fa fa-spin fa-refresh'></i> Updating, please wait!";
 
-            await fetch("/casc/updateTACTKeys");
+            await fetchWithAntiforgery("/casc/updateTACTKeys");
             window.location.reload();
         }
     </script>

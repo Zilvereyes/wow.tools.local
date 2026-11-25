@@ -5,6 +5,35 @@
  */
 const getStoredTheme = () => localStorage.getItem('theme')
 const setStoredTheme = theme => localStorage.setItem('theme', theme)
+let antiforgeryTokenPromise = null
+
+async function getAntiforgeryToken() {
+    if (antiforgeryTokenPromise == null) {
+        antiforgeryTokenPromise = fetch('/settings/antiforgery', { credentials: 'same-origin' })
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error('Unable to obtain an antiforgery token.');
+                }
+
+                return response.json();
+            })
+            .then(tokens => tokens.token);
+    }
+
+    return antiforgeryTokenPromise;
+}
+
+async function fetchWithAntiforgery(resource, options = {}) {
+    const headers = new Headers(options.headers || {});
+    headers.set('X-CSRF-TOKEN', await getAntiforgeryToken());
+
+    return fetch(resource, {
+        ...options,
+        method: options.method || 'POST',
+        credentials: 'same-origin',
+        headers: headers
+    });
+}
 
 const getPreferredTheme = () => {
     const storedTheme = getStoredTheme()

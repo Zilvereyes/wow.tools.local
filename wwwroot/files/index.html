@@ -251,7 +251,7 @@
             var button = document.getElementById("updateListfileButton");
             button.innerHTML = "<i class='fa fa-spin fa-refresh'></i> Updating, please wait!";
 
-            await fetch("/casc/updateListfile");
+            await fetchWithAntiforgery("/casc/updateListfile");
             Elements.filesTable.ajax.reload(null, false); 
 
             button.innerHTML = "<i class='fa fa-refresh'></i> Update listfile";
@@ -275,7 +275,7 @@
             var button = document.getElementById("updateTACTKeysButton");
             button.innerHTML = "<i class='fa fa-spin fa-refresh'></i> Updating, please wait!";
 
-            await fetch("/casc/updateTACTKeys");
+            await fetchWithAntiforgery("/casc/updateTACTKeys");
             Elements.filesTable.ajax.reload(null, false);
 
             button.innerHTML = "<i class='fa fa-refresh'></i> Update TACTKeys";
