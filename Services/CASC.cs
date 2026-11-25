@@ -545,6 +545,16 @@ namespace wow.tools.local.Services
 
         public static Stream? GetFileByID(uint filedataid, string? build = null, LocaleFlags locale = LocaleFlags.All_WoW)
         {
+            return GetFileByIDInternal(filedataid, build, locale, null);
+        }
+
+        public static Stream? GetFileByID(uint filedataid, long maxDecodedSize, string? build = null, LocaleFlags locale = LocaleFlags.All_WoW)
+        {
+            return GetFileByIDInternal(filedataid, build, locale, maxDecodedSize);
+        }
+
+        private static Stream? GetFileByIDInternal(uint filedataid, string? build, LocaleFlags locale, long? maxDecodedSize)
+        {
             if (string.IsNullOrEmpty(build))
                 build = BuildName;
 
@@ -573,6 +583,19 @@ namespace wow.tools.local.Services
                             preferredEntry = nonLow;
                         else
                             preferredEntry = rootEntries.First();
+                    }
+
+                    if (maxDecodedSize.HasValue)
+                    {
+                        if (maxDecodedSize.Value < 0)
+                            throw new ArgumentOutOfRangeException(nameof(maxDecodedSize));
+
+                        var encodingEntry = buildInstance.Encoding!.FindContentKey(preferredEntry.md5);
+                        if (encodingEntry == false)
+                            throw new InvalidDataException("Unable to determine the decoded file size before retrieval");
+
+                        if (encodingEntry.DecodedFileSize > (ulong)maxDecodedSize.Value)
+                            throw new InvalidDataException("File exceeds the remaining decoded-size limit");
                     }
 
                     byte[]? fileBytes = null;
