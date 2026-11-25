@@ -18,7 +18,41 @@ namespace wow.tools.local.Managers
         private static readonly Lock dbcdLock = new();
 
         private MemoryCache Cache = new(new MemoryCacheOptions() { SizeLimit = 250 });
-        private readonly ConcurrentDictionary<(string, string, bool, LocaleFlags), SemaphoreSlim> Locks = [];
+        private readonly ConcurrentDictionary<(string Name, string Build, bool UseHotfixes, LocaleFlags Locale), LockEntry> Locks = [];
+
+        private sealed class LockEntry
+        {
+            public SemaphoreSlim Semaphore { get; } = new(1, 1);
+            public int ReferenceCount { get; set; }
+        }
+
+        private LockEntry GetLockEntry((string Name, string Build, bool UseHotfixes, LocaleFlags Locale) key)
+        {
+            while (true)
+            {
+                var entry = Locks.GetOrAdd(key, _ => new LockEntry());
+
+                lock (entry)
+                {
+                    if (Locks.TryGetValue(key, out var registeredEntry) && ReferenceEquals(entry, registeredEntry))
+                    {
+                        entry.ReferenceCount++;
+                        return entry;
+                    }
+                }
+            }
+        }
+
+        private void ReleaseLockEntry((string Name, string Build, bool UseHotfixes, LocaleFlags Locale) key, LockEntry entry)
+        {
+            lock (entry)
+            {
+                entry.ReferenceCount--;
+
+                if (entry.ReferenceCount == 0)
+                    Locks.TryRemove(new(key, entry));
+            }
+        }
 
         public async Task<IDBCDStorage> GetOrLoad(string name, string build)
         {
@@ -37,26 +71,33 @@ namespace wow.tools.local.Managers
                 return await LoadDBC(name, build, useHotfixes, locale, pushIDFilter);
             }
 
-            if (Cache.TryGetValue((name, build, useHotfixes, locale), out var cachedDBC))
+            var cacheKey = (Name: name, Build: build, UseHotfixes: useHotfixes, Locale: locale);
+
+            if (Cache.TryGetValue(cacheKey, out var cachedDBC))
                 return (DBCD.IDBCDStorage)cachedDBC!;
 
-            SemaphoreSlim mylock = Locks.GetOrAdd((name, build, useHotfixes, locale), k => new SemaphoreSlim(1, 1));
-
-            await mylock.WaitAsync();
+            var lockEntry = GetLockEntry(cacheKey);
+            var lockAcquired = false;
 
             try
             {
-                if (!Cache.TryGetValue((name, build, useHotfixes, locale), out cachedDBC))
+                await lockEntry.Semaphore.WaitAsync();
+                lockAcquired = true;
+
+                if (!Cache.TryGetValue(cacheKey, out cachedDBC))
                 {
                     // Key not in cache, load DBC
                     Console.WriteLine("DBC " + name + " for build " + build + " (hotfixes: " + useHotfixes + ") is not cached, loading!");
                     cachedDBC = await LoadDBC(name, build, useHotfixes, locale);
-                    Cache.Set((name, build, useHotfixes, locale), cachedDBC, new MemoryCacheEntryOptions().SetSize(1));
+                    Cache.Set(cacheKey, cachedDBC, new MemoryCacheEntryOptions().SetSize(1));
                 }
             }
             finally
             {
-                mylock.Release();
+                if (lockAcquired)
+                    lockEntry.Semaphore.Release();
+
+                ReleaseLockEntry(cacheKey, lockEntry);
             }
 
             return (IDBCDStorage)cachedDBC!;
