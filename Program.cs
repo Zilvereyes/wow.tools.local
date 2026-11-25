@@ -21,7 +21,7 @@ namespace wow.tools.local
                 SettingsManager.ParseCommandLineArguments(args);
                 SettingsManager.ApplyProxy();
 
-                CASC.InitTACT(SettingsManager.WoWFolder, SettingsManager.WoWProduct);
+                _ = CASC.InitTACT(SettingsManager.WoWFolder, SettingsManager.WoWProduct);
             }
             catch (Exception e)
             {

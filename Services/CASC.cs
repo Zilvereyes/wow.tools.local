@@ -33,6 +33,7 @@ namespace wow.tools.local.Services
         public static List<TACTSharp.InstallInstance.InstallFileEntry> InstallEntries = [];
 
         private static readonly Lock CHashLock = new();
+        private static readonly SemaphoreSlim TACTInitLock = new(1, 1);
 
         [GeneratedRegex(@"(?<=e:\{)([0-9a-fA-F]{16})(?=,)", RegexOptions.Compiled)]
         private static partial Regex eKeyRegex();
@@ -69,7 +70,21 @@ namespace wow.tools.local.Services
 
         public static BuildInstance? buildInstance;
 
-        public static async void InitTACT(string wowFolder, string product, string overrideBC = "", string overrideCDNC = "")
+        public static async Task<bool> InitTACT(string wowFolder, string product, string overrideBC = "", string overrideCDNC = "", CancellationToken cancellationToken = default)
+        {
+            await TACTInitLock.WaitAsync(cancellationToken);
+
+            try
+            {
+                return await InitTACTCore(product, overrideBC, overrideCDNC);
+            }
+            finally
+            {
+                TACTInitLock.Release();
+            }
+        }
+
+        private static async Task<bool> InitTACTCore(string product, string overrideBC, string overrideCDNC)
         {
             IsTACTSharpInit = false;
 
@@ -104,7 +119,7 @@ namespace wow.tools.local.Services
             if (buildInstance.Root == null || buildInstance.Encoding == null)
             {
                 Console.WriteLine("Build loading failed");
-                return;
+                return false;
             }
 
             var totalTimer = new Stopwatch();
@@ -348,6 +363,7 @@ namespace wow.tools.local.Services
             IsTACTSharpInit = true;
 
             Console.WriteLine("Finished loading " + BuildName);
+            return true;
         }
 
         public static void LoadBuildInfo()

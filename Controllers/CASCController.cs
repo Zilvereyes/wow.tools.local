@@ -29,6 +29,7 @@ namespace wow.tools.local.Controllers
         private readonly DBCManager dbcManager = (DBCManager)dbcManager;
         private readonly DBCProvider dbcProvider = (DBCProvider)dbcProvider;
         private static readonly Lock moreInfoInitLock = new Lock();
+        private static readonly TimeSpan buildSwitchTimeout = TimeSpan.FromMinutes(5);
 
         [Route("fdid")]
         [HttpGet]
@@ -151,35 +152,45 @@ namespace wow.tools.local.Controllers
 
         [Route("switchProduct")]
         [HttpGet]
-        public bool SwitchProduct(string product)
+        public async Task<bool> SwitchProduct(string product, CancellationToken cancellationToken)
         {
             if (SettingsManager.ReadOnly)
                 return false;
 
-            CASC.InitTACT(SettingsManager.WoWFolder, product);
-
-            // Don't respond until things are done loading
-            while (true)
-            {
-                if (CASC.IsTACTSharpInit)
-                    return true;
-            }
+            return await SwitchBuild(product, cancellationToken: cancellationToken);
         }
 
         [Route("switchConfigs")]
         [HttpGet]
-        public bool SwitchConfigs(string product, string buildconfig, string cdnconfig)
+        public async Task<bool> SwitchConfigs(string product, string buildconfig, string cdnconfig, CancellationToken cancellationToken)
         {
             if (SettingsManager.ReadOnly)
                 return false;
 
-            CASC.InitTACT(SettingsManager.WoWFolder, product, buildconfig, cdnconfig);
+            return await SwitchBuild(product, buildconfig, cdnconfig, cancellationToken);
+        }
 
-            // Don't respond until things are done loading
-            while (true)
+        private static async Task<bool> SwitchBuild(string product, string buildconfig = "", string cdnconfig = "", CancellationToken cancellationToken = default)
+        {
+            using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeoutSource.CancelAfter(buildSwitchTimeout);
+
+            try
             {
-                if (CASC.IsTACTSharpInit)
-                    return true;
+                var initialization = Task.Run(
+                    () => CASC.InitTACT(SettingsManager.WoWFolder, product, buildconfig, cdnconfig, timeoutSource.Token),
+                    timeoutSource.Token);
+
+                return await initialization.WaitAsync(timeoutSource.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                return false;
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine("Build switch failed: " + e.Message);
+                return false;
             }
         }
 
