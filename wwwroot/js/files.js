@@ -569,6 +569,10 @@ function checkFiles() {
     var filesToCheck = document.getElementById("filesToCheck").value;
     fetch("/casc/checkFiles", {
         method: "POST",
+        headers: {
+            "Content-Type": "text/plain; charset=utf-8",
+            "X-Wow-Tools-Request": "1"
+        },
         body: filesToCheck
     })
     .then(response => response.text())

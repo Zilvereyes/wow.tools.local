@@ -1794,37 +1794,23 @@ namespace wow.tools.local.Controllers
         }
 
         [Route("checkFiles")]
-        [HttpPost]
-        public async Task<string> CheckFiles()
-        {
-            string rawContent = string.Empty;
-            using (var reader = new StreamReader(Request.Body, encoding: Encoding.UTF8))
-                rawContent = await reader.ReadToEndAsync();
-
-            var filenames = rawContent.Split("\n").ToList();
-            var unknownFDIDs = Listfile.NameMap.Where(x => x.Value == "").Select(x => x.Key).ToList();
-            var reverseLookup = Listfile.LookupMap.ToDictionary(x => x.Value, x => x.Key);
-            var hasher = new TACTSharp.Jenkins96();
-            var results = new List<string>();
-            foreach (var filename in filenames)
-            {
-                var lookup = hasher.ComputeHash(filename.Trim());
-                if (reverseLookup.TryGetValue(lookup, out var unkFDID))
-                {
-                    results.Add(unkFDID + ";" + filename);
-                }
-            }
-            return string.Join('\n', results);
-        }
-
         [Route("checkFilesFromFile")]
-        [HttpGet]
-        public string CheckFilesFromFile(string file = "")
+        [HttpPost]
+        [Consumes("text/plain")]
+        [RequestSizeLimit(BoundedTextRequest.MaxBodyBytes)]
+        public async Task<ActionResult<string>> CheckFiles(CancellationToken cancellationToken)
         {
-            if (SettingsManager.ReadOnly)
-                return "";
+            if (!BoundedTextRequest.HasRequiredHeader(Request))
+                return StatusCode(StatusCodes.Status403Forbidden);
 
-            var filenames = System.IO.File.ReadAllLines(file);
+            var body = await BoundedTextRequest.ReadLinesAsync(Request.Body, Request.ContentLength, cancellationToken);
+            if (body.Status == BoundedTextRequestStatus.InvalidEncoding)
+                return BadRequest("The request body must be valid text.");
+
+            if (body.Status != BoundedTextRequestStatus.Success)
+                return StatusCode(StatusCodes.Status413PayloadTooLarge, "The request body exceeds the allowed limits.");
+
+            var filenames = body.Lines!;
             var unknownFDIDs = Listfile.NameMap.Where(x => x.Value == "").Select(x => x.Key).ToList();
             var reverseLookup = Listfile.LookupMap.ToDictionary(x => x.Value, x => x.Key);
             var hasher = new TACTSharp.Jenkins96();
