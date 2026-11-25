@@ -21,6 +21,8 @@ namespace wow.tools.local.Utils
 
         private static readonly MethodInfo ObjectToString = typeof(object).GetMethod("ToString")!;
         private static readonly MethodInfo DBCDRowFieldMethod = typeof(DBCDRow).GetMethod(nameof(DBCDRow.Field))!;
+        private const int MaxRegexPatternLength = 256;
+        private static readonly TimeSpan RegexMatchTimeout = TimeSpan.FromMilliseconds(250);
 
         private Func<DBCDRow, bool>? FilterFunc;
         private Func<DBCDRow, object>? SortFunc;
@@ -260,7 +262,15 @@ namespace wow.tools.local.Utils
 
         private static Predicate<object> CreateRegexPredicate(string pattern)
         {
-            var re = new Regex(pattern, RegexOptions.IgnoreCase);
+            if (pattern.Length > MaxRegexPatternLength)
+                throw new ArgumentException($"Regular expression patterns cannot exceed {MaxRegexPatternLength} characters.", nameof(pattern));
+
+            var re = new Regex(
+                pattern,
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.NonBacktracking,
+                RegexMatchTimeout
+            );
+
             return (field) =>
             {
                 // Hack
